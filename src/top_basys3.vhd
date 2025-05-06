@@ -62,13 +62,19 @@ architecture top_basys3_arch of top_basys3 is
     end component;
  
     component clock_divider
-        generic (k_DIV : natural := 5000000); -- slow clock (~10Hz for 100MHz input)
+        generic (k_DIV : natural := 100000); -- slow clock (~10Hz for 100MHz input)
         Port (
             i_clk   : in STD_LOGIC;
             i_reset : in STD_LOGIC;
             o_clk   : out STD_LOGIC
         );
     end component;
+
+component sevenseg_decoder is
+    Port ( i_Hex : in STD_LOGIC_VECTOR (3 downto 0);
+           o_seg_n : out STD_LOGIC_VECTOR (6 downto 0));
+end component sevenseg_decoder;
+ 
  
     component twos_comp
         Port (
@@ -97,13 +103,17 @@ architecture top_basys3_arch of top_basys3 is
     -- Signals
     signal slow_clk   : std_logic;
     signal o_cycle    : std_logic_vector(3 downto 0);
-    signal opp_1      : std_logic_vector(7 downto 0) := (others => '0');
-    signal opp_2      : std_logic_vector(7 downto 0) := (others => '0');
     signal op_code    : std_logic_vector(2 downto 0) := (others => '0');
     signal alu_output : std_logic_vector(7 downto 0);
     signal flags      : std_logic_vector(3 downto 0);
     signal d3, d2, d1, d0 : std_logic_vector(3 downto 0);
-    signal seg_data   : std_logic_vector(3 downto 0);
+    signal w_seg : std_logic_vector(6 downto 0);
+    signal w_sel : std_logic_vector(3 downto 0);
+    signal w_data : std_logic_vector(3 downto 0);
+    signal w_bin : std_logic_vector(7 downto 0);
+    
+    signal o_A : std_logic_vector(7 downto 0);
+    signal o_B : std_logic_vector(7 downto 0);
  
 begin
  
@@ -114,10 +124,17 @@ begin
             i_adv   => btnC,
             o_cycle => o_cycle
         );
+        
+        
+     somth_inst : sevenseg_decoder
+        port map (
+            i_hex => w_data,
+            o_seg_n => w_seg
+     );
  
     -- Clock Divider to slow down the display
     clkdiv_inst : clock_divider
-        generic map (k_DIV => 5000000)  -- Adjust for ~10Hz from 100MHz
+        generic map (k_DIV => 100000)  -- Adjust for ~10Hz from 100MHz
         port map (
             i_clk   => clk,
             i_reset => btnU,
@@ -127,9 +144,9 @@ begin
     -- ALU instance
     alu_inst : ALU
         port map (
-            i_A      => opp_1,
-            i_B      => opp_2,
-            i_op     => op_code,
+            i_A      => o_A,
+            i_B      => o_B,
+            i_op     => sw(2 downto 0),
             o_result => alu_output,
             o_flags  => flags
         );
@@ -137,11 +154,11 @@ begin
     -- BCD converter
     bcd_inst : twos_comp
         port map (
-            i_bin  => alu_output,
+            i_bin  => w_bin,
             o_sign => open,
-            o_hund => d3,
-            o_tens => d2,
-            o_ones => d1
+            o_hund => d2,
+            o_tens => d1,
+            o_ones => d0
         );
  
     -- Time-Division Multiplexing for 7-seg display
@@ -150,55 +167,57 @@ begin
         port map (
             i_clk   => slow_clk,
             i_reset => btnU,
-            i_D3    => d3,
+            i_D3    => x"0",
             i_D2    => d2,
             i_D1    => d1,
-            i_D0    => flags,
-            o_data  => seg_data,
-            o_sel   => an
+            i_D0    => d0,
+            o_data  => w_data,
+            o_sel   => w_sel
         );
- 
-    -- 7-segment decoder
-    process(seg_data)
-        variable seg_temp : std_logic_vector(6 downto 0);
-    begin
-        case seg_data is
-            when "0000" => seg_temp := "1000000"; -- 0
-            when "0001" => seg_temp := "1111001"; -- 1
-            when "0010" => seg_temp := "0100100"; -- 2
-            when "0011" => seg_temp := "0110000"; -- 3
-            when "0100" => seg_temp := "0011001"; -- 4
-            when "0101" => seg_temp := "0010010"; -- 5
-            when "0110" => seg_temp := "0000010"; -- 6
-            when "0111" => seg_temp := "1111000"; -- 7
-            when "1000" => seg_temp := "0000000"; -- 8
-            when "1001" => seg_temp := "0010000"; -- 9
-            when others => seg_temp := "1111111"; -- blank
-        end case;
-        seg <= seg_temp;
-    end process;
- 
-    -- FSM data handling based on o_cycle
-    process(clk)
-    begin
-        if rising_edge(clk) then
-            case o_cycle is
-                when "0001" =>
-                    opp_1 <= sw;
-                when "0010" =>
-                    opp_2 <= sw;
-                when "0011" =>
-                    op_code <= sw(2 downto 0);
-                when others =>
-                    null;
-            end case;
-        end if;
-    end process;
+
+w_bin <= o_A when o_cycle = "0001" else
+         o_B when o_cycle = "0010" else
+         alu_output when o_cycle = "0100" else
+         x"00";
+         
+
+seg <= w_seg when (w_sel = "1110" or w_sel = "1101" or w_sel = "1011") else
+           "1111111" when flags(3) = '0' else  -- assumes 0 = positive
+           "0111111";                        -- negative sign
+           
+ an <= w_sel;
  
     -- LED output (debugging)
     led(7 downto 0)   <= alu_output;
-    led(11 downto 8)  <= flags;
-    led(15 downto 12) <= "0000";
+    led(11 downto 8)  <= "0000";
+    led(15 downto 12) <= flags;
+    
+--first register
+    reg_proc1 : process(slow_clk)
+        begin
+            if rising_edge(slow_clk) then
+                if BtnU = '1' then
+                    o_A <= (others => '0');
+                elsif o_cycle = "0001" then 
+                    o_A <= sw;
+                end if;
+            end if;
+        end process reg_proc1;
+    --second register
+    reg_proc2 : process(slow_clk)
+        begin
+            if rising_edge(slow_clk) then
+                if BtnU = '1' then
+                    o_B <= (others => '0');
+                    elsif o_cycle = "0010" then
+                        o_B <= sw;
+                    end if;
+                end if;
+        end process reg_proc2;
+    
+
+
+
  
 end top_basys3_arch;
 	
